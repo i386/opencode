@@ -1213,6 +1213,14 @@ export type ProviderConfig = {
     apiKey?: string
     baseURL?: string
     /**
+     * Discover model IDs dynamically from an OpenAI-compatible /models endpoint
+     */
+    dynamicModels?: boolean
+    /**
+     * Override the dynamic model discovery endpoint URL (defaults to <baseURL>/models)
+     */
+    modelsURL?: string
+    /**
      * GitHub Enterprise URL for copilot authentication
      */
     enterpriseUrl?: string

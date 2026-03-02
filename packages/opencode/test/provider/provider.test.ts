@@ -303,6 +303,122 @@ test("custom provider can discover models dynamically", async () => {
   }
 })
 
+test("custom provider dynamic discovery uses modelsURL override", async () => {
+  const calls: string[] = []
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url)
+      calls.push(url.pathname)
+      if (url.pathname === "/mesh/catalog") {
+        return Response.json({
+          data: [{ id: "mesh-custom" }],
+        })
+      }
+      return new Response("Not Found", { status: 404 })
+    },
+  })
+
+  try {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({
+            $schema: "https://opencode.ai/config.json",
+            provider: {
+              "mesh-llm": {
+                name: "Mesh LLM",
+                npm: "@ai-sdk/openai-compatible",
+                options: {
+                  baseURL: `http://127.0.0.1:${server.port}/v1`,
+                  modelsURL: `http://127.0.0.1:${server.port}/mesh/catalog`,
+                  apiKey: "dummy",
+                  dynamicModels: true,
+                },
+              },
+            },
+          }),
+        )
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const providers = await Provider.list()
+        expect(providers["mesh-llm"]).toBeDefined()
+        expect(Object.keys(providers["mesh-llm"].models)).toContain("mesh-custom")
+        expect(calls).toContain("/mesh/catalog")
+        expect(calls).not.toContain("/v1/models")
+      },
+    })
+  } finally {
+    await server.stop(true)
+  }
+})
+
+test("custom provider merges dynamic models with configured models", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url)
+      if (url.pathname === "/v1/models") {
+        return Response.json({
+          data: [{ id: "mesh-live" }],
+        })
+      }
+      return new Response("Not Found", { status: 404 })
+    },
+  })
+
+  try {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({
+            $schema: "https://opencode.ai/config.json",
+            provider: {
+              "mesh-llm": {
+                name: "Mesh LLM",
+                npm: "@ai-sdk/openai-compatible",
+                models: {
+                  "mesh-static": {
+                    name: "Mesh Static",
+                    tool_call: true,
+                    limit: {
+                      context: 128000,
+                      output: 4096,
+                    },
+                  },
+                },
+                options: {
+                  baseURL: `http://127.0.0.1:${server.port}/v1`,
+                  apiKey: "dummy",
+                  dynamicModels: true,
+                },
+              },
+            },
+          }),
+        )
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const providers = await Provider.list()
+        expect(providers["mesh-llm"]).toBeDefined()
+        expect(Object.keys(providers["mesh-llm"].models)).toContain("mesh-static")
+        expect(Object.keys(providers["mesh-llm"].models)).toContain("mesh-live")
+      },
+    })
+  } finally {
+    await server.stop(true)
+  }
+})
+
 test("env variable takes precedence, config merges options", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {
