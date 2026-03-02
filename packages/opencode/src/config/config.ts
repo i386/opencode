@@ -954,6 +954,14 @@ export namespace Config {
         .object({
           apiKey: z.string().optional(),
           baseURL: z.string().optional(),
+          dynamicModels: z
+            .boolean()
+            .optional()
+            .describe("Discover model IDs dynamically from an OpenAI-compatible /models endpoint"),
+          modelsURL: z
+            .string()
+            .optional()
+            .describe("Override the dynamic model discovery endpoint URL (defaults to <baseURL>/models)"),
           enterpriseUrl: z.string().optional().describe("GitHub Enterprise URL for copilot authentication"),
           setCacheKey: z.boolean().optional().describe("Enable promptCacheKey for this provider (default false)"),
           timeout: z

@@ -84,6 +84,79 @@ export namespace Provider {
     })
   }
 
+  function loadProviderBaseURL(providerID: string, baseURL: unknown, options: Record<string, any>) {
+    if (typeof baseURL !== "string") return baseURL
+    const vars = providerID === "google-vertex" ? googleVertexVars(options) : undefined
+    return baseURL.replace(/\$\{([^}]+)\}/g, (match, key) => {
+      const val = Env.get(String(key)) ?? vars?.[String(key) as keyof typeof vars]
+      return val ?? match
+    })
+  }
+
+  const DynamicModelResponse = z
+    .object({
+      data: z.array(
+        z.object({
+          id: z.string(),
+        }),
+      ),
+    })
+    .passthrough()
+
+  async function dynamicModels(
+    providerID: string,
+    provider: NonNullable<Awaited<ReturnType<typeof Config.get>>["provider"]>[string],
+    env: Record<string, string | undefined>,
+  ) {
+    if (provider.options?.dynamicModels !== true) return []
+    const baseURL = loadProviderBaseURL(
+      providerID,
+      provider.options?.baseURL ?? provider.api,
+      provider.options ?? {},
+    )
+    if (typeof baseURL !== "string" || !baseURL.length) {
+      log.warn("skipping dynamic model discovery because base URL is missing", { providerID })
+      return []
+    }
+
+    const headers = new Headers()
+    if (provider.options?.headers && typeof provider.options.headers === "object") {
+      for (const [key, value] of Object.entries(provider.options.headers)) {
+        if (typeof value === "string") headers.set(key, value)
+      }
+    }
+
+    const key =
+      provider.options?.apiKey ??
+      provider.env?.map((item) => env[item]).find(Boolean) ??
+      (await Auth.get(providerID).then((auth) => (auth?.type === "api" ? auth.key : undefined)))
+    if (typeof key === "string" && !headers.has("authorization")) headers.set("Authorization", `Bearer ${key}`)
+
+    const endpoint =
+      typeof provider.options?.modelsURL === "string" && provider.options.modelsURL.length > 0
+        ? provider.options.modelsURL
+        : `${baseURL.replace(/\/$/, "")}/models`
+
+    const response = await fetch(endpoint, {
+      headers,
+      signal: AbortSignal.timeout(10 * 1000),
+    }).catch(() => undefined)
+
+    if (!response?.ok) {
+      log.warn("dynamic model discovery failed", { providerID, endpoint, status: response?.status })
+      return []
+    }
+
+    const payload = await response.json().catch(() => undefined)
+    const parsed = DynamicModelResponse.safeParse(payload)
+    if (!parsed.success) {
+      log.warn("dynamic model discovery returned unexpected shape", { providerID, endpoint })
+      return []
+    }
+
+    return [...new Set(parsed.data.data.map((item) => item.id))]
+  }
+
   const BUNDLED_PROVIDERS: Record<string, (options: any) => SDK> = {
     "@ai-sdk/amazon-bedrock": createAmazonBedrock,
     "@ai-sdk/anthropic": createAnthropic,
@@ -759,6 +832,7 @@ export namespace Provider {
     const config = await Config.get()
     const modelsDev = await ModelsDev.get()
     const database = mapValues(modelsDev, fromModelsDevProvider)
+    const env = Env.all()
 
     const disabled = new Set(config.disabled_providers ?? [])
     const enabled = config.enabled_providers ? new Set(config.enabled_providers) : null
@@ -807,6 +881,87 @@ export namespace Provider {
       providers[providerID] = mergeDeep(match, provider)
     }
 
+    function configModel(
+      providerID: string,
+      provider: NonNullable<Awaited<ReturnType<typeof Config.get>>["provider"]>[string],
+      parsed: Info,
+      modelID: string,
+      model: NonNullable<NonNullable<Awaited<ReturnType<typeof Config.get>>["provider"]>[string]["models"]>[string],
+    ) {
+      const existingModel = parsed.models[model.id ?? modelID]
+      const name = iife(() => {
+        if (model.name) return model.name
+        if (model.id && model.id !== modelID) return modelID
+        return existingModel?.name ?? modelID
+      })
+
+      const parsedModel: Model = {
+        id: modelID,
+        api: {
+          id: model.id ?? existingModel?.api.id ?? modelID,
+          npm:
+            model.provider?.npm ??
+            provider.npm ??
+            existingModel?.api.npm ??
+            modelsDev[providerID]?.npm ??
+            "@ai-sdk/openai-compatible",
+          url:
+            model.provider?.api ??
+            provider?.api ??
+            provider.options?.baseURL ??
+            existingModel?.api.url ??
+            modelsDev[providerID]?.api,
+        },
+        status: model.status ?? existingModel?.status ?? "active",
+        name,
+        providerID,
+        capabilities: {
+          temperature: model.temperature ?? existingModel?.capabilities.temperature ?? false,
+          reasoning: model.reasoning ?? existingModel?.capabilities.reasoning ?? false,
+          attachment: model.attachment ?? existingModel?.capabilities.attachment ?? false,
+          toolcall: model.tool_call ?? existingModel?.capabilities.toolcall ?? true,
+          input: {
+            text: model.modalities?.input?.includes("text") ?? existingModel?.capabilities.input.text ?? true,
+            audio: model.modalities?.input?.includes("audio") ?? existingModel?.capabilities.input.audio ?? false,
+            image: model.modalities?.input?.includes("image") ?? existingModel?.capabilities.input.image ?? false,
+            video: model.modalities?.input?.includes("video") ?? existingModel?.capabilities.input.video ?? false,
+            pdf: model.modalities?.input?.includes("pdf") ?? existingModel?.capabilities.input.pdf ?? false,
+          },
+          output: {
+            text: model.modalities?.output?.includes("text") ?? existingModel?.capabilities.output.text ?? true,
+            audio: model.modalities?.output?.includes("audio") ?? existingModel?.capabilities.output.audio ?? false,
+            image: model.modalities?.output?.includes("image") ?? existingModel?.capabilities.output.image ?? false,
+            video: model.modalities?.output?.includes("video") ?? existingModel?.capabilities.output.video ?? false,
+            pdf: model.modalities?.output?.includes("pdf") ?? existingModel?.capabilities.output.pdf ?? false,
+          },
+          interleaved: model.interleaved ?? false,
+        },
+        cost: {
+          input: model?.cost?.input ?? existingModel?.cost?.input ?? 0,
+          output: model?.cost?.output ?? existingModel?.cost?.output ?? 0,
+          cache: {
+            read: model?.cost?.cache_read ?? existingModel?.cost?.cache.read ?? 0,
+            write: model?.cost?.cache_write ?? existingModel?.cost?.cache.write ?? 0,
+          },
+        },
+        options: mergeDeep(existingModel?.options ?? {}, model.options ?? {}),
+        limit: {
+          context: model.limit?.context ?? existingModel?.limit?.context ?? 0,
+          output: model.limit?.output ?? existingModel?.limit?.output ?? 0,
+        },
+        headers: mergeDeep(existingModel?.headers ?? {}, model.headers ?? {}),
+        family: model.family ?? existingModel?.family ?? "",
+        release_date: model.release_date ?? existingModel?.release_date ?? "",
+        variants: {},
+      }
+      const merged = mergeDeep(ProviderTransform.variants(parsedModel), model.variants ?? {})
+      parsedModel.variants = mapValues(
+        pickBy(merged, (v) => !v.disabled),
+        (v) => omit(v, ["disabled"]),
+      )
+      parsed.models[modelID] = parsedModel
+    }
+
     // extend database from config
     for (const [providerID, provider] of configProviders) {
       const existing = database[providerID]
@@ -820,78 +975,17 @@ export namespace Provider {
       }
 
       for (const [modelID, model] of Object.entries(provider.models ?? {})) {
-        const existingModel = parsed.models[model.id ?? modelID]
-        const name = iife(() => {
-          if (model.name) return model.name
-          if (model.id && model.id !== modelID) return modelID
-          return existingModel?.name ?? modelID
-        })
-        const parsedModel: Model = {
-          id: modelID,
-          api: {
-            id: model.id ?? existingModel?.api.id ?? modelID,
-            npm:
-              model.provider?.npm ??
-              provider.npm ??
-              existingModel?.api.npm ??
-              modelsDev[providerID]?.npm ??
-              "@ai-sdk/openai-compatible",
-            url: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[providerID]?.api,
-          },
-          status: model.status ?? existingModel?.status ?? "active",
-          name,
-          providerID,
-          capabilities: {
-            temperature: model.temperature ?? existingModel?.capabilities.temperature ?? false,
-            reasoning: model.reasoning ?? existingModel?.capabilities.reasoning ?? false,
-            attachment: model.attachment ?? existingModel?.capabilities.attachment ?? false,
-            toolcall: model.tool_call ?? existingModel?.capabilities.toolcall ?? true,
-            input: {
-              text: model.modalities?.input?.includes("text") ?? existingModel?.capabilities.input.text ?? true,
-              audio: model.modalities?.input?.includes("audio") ?? existingModel?.capabilities.input.audio ?? false,
-              image: model.modalities?.input?.includes("image") ?? existingModel?.capabilities.input.image ?? false,
-              video: model.modalities?.input?.includes("video") ?? existingModel?.capabilities.input.video ?? false,
-              pdf: model.modalities?.input?.includes("pdf") ?? existingModel?.capabilities.input.pdf ?? false,
-            },
-            output: {
-              text: model.modalities?.output?.includes("text") ?? existingModel?.capabilities.output.text ?? true,
-              audio: model.modalities?.output?.includes("audio") ?? existingModel?.capabilities.output.audio ?? false,
-              image: model.modalities?.output?.includes("image") ?? existingModel?.capabilities.output.image ?? false,
-              video: model.modalities?.output?.includes("video") ?? existingModel?.capabilities.output.video ?? false,
-              pdf: model.modalities?.output?.includes("pdf") ?? existingModel?.capabilities.output.pdf ?? false,
-            },
-            interleaved: model.interleaved ?? false,
-          },
-          cost: {
-            input: model?.cost?.input ?? existingModel?.cost?.input ?? 0,
-            output: model?.cost?.output ?? existingModel?.cost?.output ?? 0,
-            cache: {
-              read: model?.cost?.cache_read ?? existingModel?.cost?.cache.read ?? 0,
-              write: model?.cost?.cache_write ?? existingModel?.cost?.cache.write ?? 0,
-            },
-          },
-          options: mergeDeep(existingModel?.options ?? {}, model.options ?? {}),
-          limit: {
-            context: model.limit?.context ?? existingModel?.limit?.context ?? 0,
-            output: model.limit?.output ?? existingModel?.limit?.output ?? 0,
-          },
-          headers: mergeDeep(existingModel?.headers ?? {}, model.headers ?? {}),
-          family: model.family ?? existingModel?.family ?? "",
-          release_date: model.release_date ?? existingModel?.release_date ?? "",
-          variants: {},
-        }
-        const merged = mergeDeep(ProviderTransform.variants(parsedModel), model.variants ?? {})
-        parsedModel.variants = mapValues(
-          pickBy(merged, (v) => !v.disabled),
-          (v) => omit(v, ["disabled"]),
-        )
-        parsed.models[modelID] = parsedModel
+        configModel(providerID, provider, parsed, modelID, model)
+      }
+
+      for (const modelID of await dynamicModels(providerID, provider, env)) {
+        if (parsed.models[modelID]) continue
+        configModel(providerID, provider, parsed, modelID, {})
       }
       database[providerID] = parsed
     }
 
     // load env
-    const env = Env.all()
     for (const [providerID, provider] of Object.entries(database)) {
       if (disabled.has(providerID)) continue
       const apiKey = provider.env.map((item) => env[item]).find(Boolean)

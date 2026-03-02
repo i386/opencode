@@ -46,6 +46,29 @@ You can customize the base URL for any provider by setting the `baseURL` option.
 }
 ```
 
+#### Dynamic Models
+
+For OpenAI-compatible providers that expose `GET /models`, enable dynamic model discovery so OpenCode loads model IDs automatically at startup.
+
+```json title="opencode.json"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "mesh-llm": {
+      "name": "Mesh LLM",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://localhost:9337/v1",
+        "apiKey": "dummy",
+        "dynamicModels": true
+      }
+    }
+  }
+}
+```
+
+If your endpoint is not `<baseURL>/models`, set `options.modelsURL`.
+
 ---
 
 ## OpenCode Zen
